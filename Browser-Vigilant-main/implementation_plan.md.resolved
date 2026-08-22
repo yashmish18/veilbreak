@@ -1,0 +1,304 @@
+# Browser Vigilant v2.0 — Full Implementation Plan
+
+---
+
+## 🔑 Core Principles
+
+1. **Zero blacklist at runtime** — the ML model scores any URL from math features alone
+2. **Zero telemetry** — no URL, no feature, no verdict ever leaves the device
+3. **100% on-device** — ONNX inference runs in the browser service worker, ~3ms
+4. **Threat Vault** (not "ledger") — Merkle-tree of SHA-256 domain hashes, tamper-evident
+
+---
+
+## 🏗️ 5-Layer Security Pipeline
+
+```
+Navigation fires → webNavigation.onBeforeNavigate (background.js)
+                                │
+         ┌──────────────────────▼──────────────────────┐
+         │  LAYER 1 — Threat Vault Hash Cache  <0.1ms  │
+         │  Merkle-tree of SHA-256(hostname) hashes     │
+         │  of every domain this session blocked        │
+         │  ├─ MATCH → instant block, zero ML cost      │
+         │  └─ NO MATCH → Layer 2                       │
+         └──────────────────────┬──────────────────────┘
+                                │
+         ┌──────────────────────▼──────────────────────┐
+         │  LAYER 2 — Heuristic Pre-filter  <2ms       │
+         │  12 deterministic rules:                     │
+         │  Punycode, IP-in-URL, brand Levenshtein ≤2, │
+         │  suspicious TLD, @ count, subdomain depth,  │
+         │  HTTP+login keywords, UPI VPA regex,         │
+         │  executable extension, percent-encoding ratio│
+         │  ├─ score ≥ 0.50 → THREAT, block + vault    │
+         │  ├─ score ≥ 0.30 → WARNING, notify          │
+         │  └─ score < 0.30 → Layer 3                  │
+         └──────────────────────┬──────────────────────┘
+                                │
+         ┌──────────────────────▼──────────────────────┐
+         │  LAYER 3 — Bayesian URL Scorer  <1ms        │
+         │  Naïve Bayes on 8 URL token n-grams (2,3)   │
+         │  pre-computed character frequency tables     │
+         │  Fast probabilistic pre-filter before ONNX  │
+         │  ├─ P(phish) > 0.85 → THREAT, block + vault │
+         │  ├─ P(phish) > 0.55 → go to Layer 4 anyway  │
+         │  └─ P(phish) < 0.15 → SAFE, skip Layer 4   │
+         └──────────────────────┬──────────────────────┘
+                                │ (ambiguous 0.15–0.85)
+         ┌──────────────────────▼──────────────────────┐
+         │  LAYER 4 — ONNX ML Ensemble  <5ms           │
+         │  Random Forest (300 trees) +                 │
+         │  XGBoost (200 rounds) soft-vote              │
+         │  Trained on 235k+ real URLs (5 datasets)    │
+         │  Input: 56 math features from URL string     │
+         │  Output: P(phishing) ∈ [0.0, 1.0]           │
+         │  ├─ P ≥ 0.50 → THREAT, block + vault        │
+         │  ├─ P ≥ 0.30 → WARNING, notify              │
+         │  └─ P < 0.30 → SAFE                         │
+         └──────────────────────┬──────────────────────┘
+                                │ (page loads)
+         ┌──────────────────────▼──────────────────────┐
+         │  LAYER 5 — DOM Behavioral Engine  async     │
+         │  Runs after DOMContentLoaded via content.js  │
+         │  MutationObserver watches live DOM changes   │
+         │  Detects: credential-harvesting forms,       │
+         │  hidden iframes, clipboard hijacking,        │
+         │  eval(atob()) obfuscation, fake overlays,    │
+         │  UPI QR codes, form action domain mismatch   │
+         │  ├─ CRITICAL signal → inject alert banner    │
+         │  └─ Sends final verdict to background.js     │
+         └────────────────────────────────────────────┘
+```
+
+---
+
+## 📦 Training Data Sources (Offline — no runtime downloads)
+
+| Dataset | Size | URLs | Source |
+|---------|------|------|--------|
+| **PhiUSIIL** (UCI, 2024) | 235,795 URLs | 134,850 legit + 100,945 phishing | `archive.ics.uci.edu/dataset/967` |
+| **ISCX-URL-2016** (CIC/UNB) | 36,707 URLs | Benign, phishing, malware, spam, defacement | `www.unb.ca/cic/datasets/url-2016.html` |
+| **PhishTank live CSV** | ~50k URLs | Active phishing, community-verified | `data.phishtank.com/data/online-valid.csv` |
+| **Tranco top-1M** | top 15k sampled | High-confidence legitimate sites | `tranco-list.eu/top-1m.csv.zip` |
+| **Mendeley 2024** | 450,176 URLs | 104k phishing + 345k legit | PhishTank + Majestic Million |
+
+**Total training corpus: ~250,000–450,000 URL samples** (after deduplication and balance sampling)
+
+**train.py downloads all 5 datasets at training time** (one-time offline script, not at runtime).
+
+---
+
+## 🧠 ML Techniques & Math
+
+### Feature Engineering — 56 URL Features
+
+> All features computed from URL string alone. Zero network calls. Zero page content access.
+
+**Group A — Lexical Structure (16 features)**
+| # | Feature | Math |
+|---|---------|------|
+| 0 | URL length | [len(url)](file:///d:/Browser-Vigilant/background.js#343-358) |
+| 1–3 | Domain / Path / Query length | [len(part)](file:///d:/Browser-Vigilant/background.js#343-358) |
+| 4–8 | Dot, hyphen, underscore, slash, @ counts | `str.count(char)` |
+| 9 | Digit count | `Σ isdigit(c)` |
+| 10 | Digit ratio | `digits / len(url)` |
+| 11 | HTTPS flag | `1 if scheme=="https" else 0` |
+| 12 | IP-in-URL | regex `\d{1,3}(\.\d{1,3}){3}` |
+| 13 | Punycode | `"xn--" in host` |
+| 14 | Subdomain depth | [len(labels) - 2](file:///d:/Browser-Vigilant/background.js#343-358) |
+| 15 | Port anomaly | `port not in {80,443,8080}` |
+
+**Group B — Information Theory (3 features)**
+| # | Feature | Math |
+|---|---------|------|
+| 15 | URL Shannon entropy | `H = -Σ p(c) · log₂(p(c))` |
+| 16 | Domain Shannon entropy | same, over domain chars |
+| 17 | Path Shannon entropy | same, over path chars |
+
+These three detect random-looking strings typical of auto-generated phishing domains.
+
+**Group C — Brand Similarity (3 features)**
+| # | Feature | Math |
+|---|---------|------|
+| 18 | Min Levenshtein distance to 50 brands | Wagner-Fischer `O(m×n)` |
+| 19 | Brand-spoof flag | `1 if 0 < dist ≤ 2` |
+| 20 | Brand in subdomain only | `brand in subdomain AND brand not in reg_domain` |
+
+**Group D — Keyword Signals (6 features)**
+Binary flags: login keywords, trust-word misuse, payment keywords, free/prize keywords, fraud action words, UPI VPA regex match.
+
+**Group E — URL Obfuscation & Encoding (5 features)**
+Percent-encoding ratio, double extension path (`pdf.exe`), base64-in-query detection, path traversal (`../`), fragment presence.
+
+**Group F — Domain Quality (8 features)**
+Suspicious TLD lookup, TLD length, vowel ratio in domain, max consecutive consonants, URL char compression ratio, short-URL service flag, numeric-only domain flag, query param count.
+
+**Group G — UPI/Payment Specific (3 features)**
+UPI VPA pattern match, suspicious VPA prefix (refund/tax/kyc), fake UPI handle Levenshtein score.
+
+---
+
+### Model Architecture
+
+```
+56 float features
+       │
+  ┌────┴────┐
+  │         │
+  RF        XGBoost
+300 trees   200 rounds
+depth=8     depth=6
+sqrt feats  eta=0.05
+balanced    subsample=0.8
+  │         │
+  └────┬────┘
+       │ Soft Vote: avg(P_RF, P_XGBoost)
+       │
+  Platt Scaling (CalibratedClassifierCV)
+       │ calibrates P → true probability
+       ▼
+  P(phishing) ∈ [0.0, 1.0]
+```
+
+**Why XGBoost over GBM:** XGBoost achieves 98.7% accuracy on URL datasets vs GBM's ~96%. It uses second-order gradient approximation and regularization (L1+L2) to prevent overfitting on the larger 250k dataset.
+
+**Why Platt Scaling:** Raw RF/XGBoost output probabilities are poorly calibrated (overconfident). Platt Scaling fits a logistic regression on CV predictions: `P_cal = 1 / (1 + exp(A·f + B))` where A, B are fitted on held-out fold predictions.
+
+**Why SMOTE for balance:** If dataset has 70% legit / 30% phishing, SMOTE (Synthetic Minority Oversampling TEchnique) generates synthetic phishing samples via k-NN interpolation in feature space rather than simple duplication.
+
+### Cross-Validation & Evaluation
+- **10-fold stratified CV** → each fold has same phishing ratio
+- Metrics reported: Accuracy, Precision, Recall, F1, **ROC-AUC** (main metric)
+- Target: ROC-AUC ≥ 0.97, F1 ≥ 0.95
+
+### Explainability (Shapley Values)
+For popup UI "Threat DNA" display:
+```python
+import shap
+explainer = shap.TreeExplainer(rf_model)
+shap_values = explainer.shap_values(X_test)
+# top-5 contributing features per URL shown in popup
+```
+This shows the user exactly WHY a site was flagged (e.g., "Brand Spoof +0.34, Suspicious TLD +0.28").
+
+---
+
+## 🔒 Threat Vault (Replaces "Ledger")
+
+**Not a "ledger". Not a "log". It's a Merkle-tree Threat Vault.**
+
+### What is it
+A Merkle tree where each leaf node is `SHA-256(hostname)` of a confirmed-blocked domain. The root hash proves tamper-evidence for the entire vault.
+
+```
+            Root Hash
+           /         \
+      H(L1|L2)     H(L3|L4)
+       /   \         /   \
+    H(d1) H(d2)  H(d3) H(d4)
+     │     │       │     │
+  SHA256 SHA256 SHA256 SHA256
+  (host1)(host2)(host3)(host4)
+```
+
+**Why Merkle over chain**: A Merkle tree allows O(log n) inclusion proofs — you can verify a single domain is in the vault without reading all entries. Blockchain chains force O(n) traversal. Merkle is also standard in certificate transparency (Google CT logs) and Git's object store.
+
+### Privacy: Why SHA-256(hostname) is safe
+- The raw URL is **never stored** — only the hash
+- SHA-256 is a one-way function: `SHA-256("evil-phish.xyz") → "a4f3b..."` — cannot reverse
+- No browsing history is preserved — a hash tells you nothing about the user's session
+- Even if the vault is stolen, an attacker only gets a list of domain hashes — no user data
+
+### In-Memory Fast Path
+On startup: vault hashes loaded into a JS [Set](file:///d:/Browser-Vigilant/background.js#137-141) → O(1) lookup per navigation.
+On new block: hash added to Set immediately + Merkle root recomputed + persisted to `chrome.storage.local`.
+
+---
+
+## 🔐 Privacy Architecture
+
+> [!IMPORTANT]
+> Zero-capture design: No URL, hostname, or feature vector ever leaves the device.
+
+| Concern | Solution |
+|---------|---------|
+| URLs stored in history | Only SHA-256 digest of domain stored in vault — raw URL stored in session-only scan history, clearable by user |
+| ML model sent to server | ONNX file is bundled with extension at install time — no external inference |
+| Training data contains user browsing | Training happens offline on developer machine with public datasets only |
+| Vault stolen from storage | Contains only one-way SHA-256 hashes — mathematically irreversible |
+| Feature vectors leak URL info | Features are math transforms (entropy, lengths, ratios) — non-invertible |
+| Chrome storage readable | `chrome.storage.local` is sandboxed to extension — no website can read it |
+| History tab shows URLs | Stored encrypted with `chrome.storage.local` — user can clear at any time |
+| Notifications show URL | Truncated to hostname only, not full path |
+
+---
+
+## 📁 Files to Change
+
+### [MODIFY] [model/train.py](file:///d:/Browser-Vigilant/model/train.py)
+- Download PhiUSIIL + PhishTank + Tranco at training time
+- Extract 56 features via [features.py](file:///d:/Browser-Vigilant/model/features.py)
+- Train RF + XGBoost with SMOTE + Platt Scaling
+- 10-fold CV metrics
+- Export `model.onnx`
+
+### [MODIFY] [model/features.py](file:///d:/Browser-Vigilant/model/features.py)
+- Expand from 48 to 56 features (add 8 from Group F/G)
+- Keep identical feature order between Python and Rust WASM
+
+### [MODIFY] [model/requirements.txt](file:///d:/Browser-Vigilant/model/requirements.txt)
+- Add: `xgboost`, `imbalanced-learn`, `shap`, `requests`, `tqdm`
+- Bump: `scikit-learn >= 1.4`, `onnxruntime >= 1.18`
+
+### [MODIFY] [background.js](file:///d:/Browser-Vigilant/background.js)
+- Add `blockedDomainHashes` in-memory Set
+- Add Merkle root computation and verification
+- Add `domainHash` field to vault blocks
+- Add `SCAN_URL` message handler for popup scanner
+- Add Bayesian pre-scorer (Layer 3) using pre-trained character frequency tables
+- Add Layer 1 vault lookup BEFORE heuristics in `webNavigation.onBeforeNavigate`
+
+### [MODIFY] [popup/src/components/Shield.svelte](file:///d:/Browser-Vigilant/popup/src/components/Shield.svelte)
+- Remove `quickScan()`, `SCAN_BRANDS`, `SCAN_SUSP_TLDS`, `scanLev()` — all duplicated logic
+- Replace with `chrome.runtime.sendMessage({ type: "SCAN_URL", url })` call
+- Display Shapley feature importance bars ("Threat DNA")
+
+### [MODIFY] [popup/src/App.svelte](file:///d:/Browser-Vigilant/popup/src/App.svelte)
+- Fix popup width to 380px (Chrome extension constraint)
+
+### [MODIFY] [popup/src/components/ThreatMap.svelte](file:///d:/Browser-Vigilant/popup/src/components/ThreatMap.svelte)
+- Rename references from "ledger" to "Threat Vault"
+- Show Merkle root hash for vault integrity proof
+
+---
+
+## ✅ Verification Plan
+
+### 1. Train model (offline, once)
+```bash
+cd model && pip install -r requirements.txt && python train.py
+# Expected: ROC-AUC ≥ 0.97, model.onnx created
+```
+### 2. Smoke test ONNX
+```bash
+python -c "
+import onnxruntime as rt, numpy as np
+from features import extract_features
+urls = [('http://paypal-secure.verify.xyz/signin', '>0.7'),
+        ('https://www.github.com', '<0.2')]
+sess = rt.InferenceSession('model.onnx')
+for url, expect in urls:
+    f = np.array([extract_features(url)], dtype=np.float32)
+    p = sess.run(None, {'input': f})[1][0][1]
+    print(f'{url[:45]} → {p:.3f} (expect {expect})')
+"
+```
+### 3. Build popup
+```bash
+cd popup && npm run build  # generates dist-popup/
+```
+### 4. Load extension + manual navigation tests
+- `http://paypal-secure.account-verify.xyz` → blocked
+- `https://www.google.com` → safe
+- Second visit to blocked domain → instant vault block (<0.1ms, no ML)
