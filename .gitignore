@@ -1,15 +1,19 @@
 # Dependencies
 node_modules/
 */node_modules/
+.pnp
+.pnp.js
 
-# Build and dist outputs
+# Next.js & Build outputs
 .next/
 */.next/
-dist/
-dist-ssr/
 out/
+*/out/
 build/
+dist/
+dist-popup/
 .vercel/
+.turbo/
 
 # Logs
 logs/
@@ -23,11 +27,23 @@ lerna-debug.log*
 # Environment variables & secrets
 .env
 .env.*
+.env*.local
 !.env.example
 
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
 # IDEs and editors
-.vscode/*
-!.vscode/extensions.json
+.vscode/
 .vs/
 .idea/
 *.suo
@@ -35,6 +51,8 @@ lerna-debug.log*
 *.njsproj
 *.sln
 *.sw?
+*.swp
+*.swo
 
 # OS generated files
 .DS_Store
@@ -42,6 +60,7 @@ Thumbs.db
 
 # TypeScript build info
 *.tsbuildinfo
+next-env.d.ts
 
 # Scratch & temporary files
 *.tmp
