@@ -1,0 +1,48 @@
+# Dependencies
+node_modules/
+*/node_modules/
+
+# Build and dist outputs
+.next/
+*/.next/
+dist/
+dist-ssr/
+out/
+build/
+.vercel/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Environment variables & secrets
+.env
+.env.*
+!.env.example
+
+# IDEs and editors
+.vscode/*
+!.vscode/extensions.json
+.vs/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# TypeScript build info
+*.tsbuildinfo
+
+# Scratch & temporary files
+*.tmp
+implementation_plan.md.resolved
