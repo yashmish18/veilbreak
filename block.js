@@ -1,5 +1,5 @@
 document.addEventListener("DOMContentLoaded", () => {
-    // Parse query params from content.js
+    // Parse query params
     const params = new URLSearchParams(window.location.search);
     const blockedUrl = decodeURIComponent(params.get("url") || "");
     const threat = params.get("threat") || "Unknown Threat";
@@ -7,7 +7,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const signals = rawSignals ? rawSignals.split("|").filter(Boolean) : [];
 
     // Populate Threat Info
-    document.getElementById("blockedUrl").textContent = blockedUrl || document.referrer || "Unknown";
+    document.getElementById("blockedUrl").textContent = blockedUrl || document.referrer || "Unknown Destination";
     const displayThreat = signals.length > 0 ? signals.join(", ") : threat;
     document.getElementById("threatType").textContent = displayThreat;
     document.getElementById("threatTypeLabel").textContent = threat.toUpperCase();
@@ -21,9 +21,20 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     });
 
-    // Proceed anyway — warn and proceed
-    document.getElementById("btnProceed").addEventListener("click", () => {
-        if (confirm("⚠ WARNING: This page has been identified as dangerous.\n\nProceeding may expose you to phishing, malware, or fraud.\n\nAre you sure you want to continue?")) {
+    // Proceed anyway — notify background of temporary bypass and navigate
+    document.getElementById("btnProceed").addEventListener("click", async () => {
+        if (confirm("⚠ WARNING: This page has been identified as dangerous.\n\nProceeding may expose you to phishing, malware, or credential harvesting.\n\nAre you sure you want to proceed?")) {
+            try {
+                if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+                    await chrome.runtime.sendMessage({
+                        type: "TEMPORARY_BYPASS",
+                        url: blockedUrl
+                    });
+                }
+            } catch (e) {
+                console.warn("Could not notify background of bypass:", e);
+            }
+
             try {
                 const proceedUrl = new URL(blockedUrl);
                 proceedUrl.searchParams.set("bv_allow", "1");

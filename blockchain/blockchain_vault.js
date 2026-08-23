@@ -1,281 +1,94 @@
 /**
- * Browser Vigilant Blockchain Integration
- * Main interface for blockchain-based threat detection and management
+ * blockchain_vault.js — Client-Side Cryptographic Merkle Threat Ledger
+ * 
+ * Responsibilities:
+ *  1. Maintain local cryptographic Merkle tree of confirmed threat hashes
+ *  2. O(1) in-memory lookup for pre-navigation checks
+ *  3. Cryptographic inclusion proofs (compact proofs)
+ *  4. Tamper detection via Merkle root validation
+ *  5. Asymmetric signed communication with backend threat vault API
  */
 
+import { MerkleTree } from './merkle_tree.js';
+import { identity } from './identity.js';
+
 class BlockchainThreatVault {
-    constructor(merkleTree = null, consensus = null, registry = null) {
+    constructor(merkleTree = null) {
         this.merkleTree = merkleTree || new MerkleTree();
-        this.consensus = consensus || new FederatedConsensus(this.generateNodeId());
-        this.registry = registry || new ThreatRegistry();
+        this.identity = identity;
         this.isInitialized = false;
         this.syncInterval = null;
-        this.localThreats = new Set(); // Cache of locally confirmed threats
+        this.localThreats = new Set(); // In-memory Set of verified domain SHA-256 hashes
+        this.apiBaseUrl = 'http://localhost:3000/api/vault';
     }
 
-    // Generate unique node identifier
-    generateNodeId() {
-        // Create a unique identifier for this browser instance
-        const randomPart = Math.random().toString(36).substring(2, 15);
-        const timestamp = Date.now().toString(36);
-        return `node_` + randomPart + `_` + timestamp;
-    }
-
-    // Initialize the blockchain system
+    /**
+     * Initialize the cryptographic vault & ECDSA identity
+     */
     async initialize() {
         if (this.isInitialized) return;
 
         try {
-            // Load existing threat data
+            await this.identity.initialize();
             await this.loadThreatData();
-
-            // Register as validator
-            await this.registerAsValidator();
-
-            // Start synchronization
-            this.startSync();
+            
+            // Try registering public key with backend
+            this.identity.ensureRegistered(this.apiBaseUrl).catch(() => {});
 
             this.isInitialized = true;
-            console.log('Blockchain Threat Vault initialized successfully');
-
+            console.log(`[Cryptographic Vault] Initialized. Node ID: ${this.identity.clientId}`);
         } catch (error) {
-            ;
+            console.error('[Cryptographic Vault] Initialization error:', error);
             throw error;
         }
     }
 
-    // Load threat data from storage
+    /**
+     * Load threat ledger from local storage
+     */
     async loadThreatData() {
         try {
-            const data = await chrome.storage.local.get(['threatVault', 'merkleTree']);
+            if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+                const data = await chrome.storage.local.get(['bv_threat_vault', 'bv_merkle_tree']);
 
-            if (data.threatVault) {
-                this.registry.importData(data.threatVault);
-            }
+                if (data.bv_merkle_tree) {
+                    await this.merkleTree.deserialize(data.bv_merkle_tree);
+                }
 
-            if (data.merkleTree) {
-                await this.merkleTree.deserialize(data.merkleTree);
-            }
-
-            // Rebuild local threat cache
-            const verifiedThreats = this.registry.getThreatsByStatus('verified');
-            for (const threat of verifiedThreats) {
-                this.localThreats.add(threat.domainHash);
-            }
-
-        } catch (error) {
-            ;
-        }
-    }
-
-    // Save threat data to storage
-    async saveThreatData() {
-        try {
-            const data = {
-                threatVault: this.registry.exportData(),
-                merkleTree: this.merkleTree.serialize()
-            };
-
-            await chrome.storage.local.set(data);
-        } catch (error) {
-            ;
-        }
-    }
-
-    // Register this instance as a validator
-    async registerAsValidator() {
-        try {
-            // Generate key pair (simplified for browser environment)
-            const publicKey = await this.generatePublicKey();
-            const stakeAmount = 100; // Minimum stake
-
-            await this.registry.registerValidator(this.consensus.nodeId, publicKey, stakeAmount);
-            console.log('Validator registered successfully with stake: ' + stakeAmount);
-
-        } catch (error) {
-            ;
-        }
-    }
-
-    // Generate public key (simplified implementation)
-    async generatePublicKey() {
-        // In a real implementation, this would use Web Crypto API for key generation
-        const encoder = new TextEncoder();
-        const data = encoder.encode(this.consensus.nodeId + Date.now());
-        const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-        const hashArray = Array.from(new Uint8Array(hashBuffer));
-        return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-    }
-
-    // Start periodic synchronization
-    startSync() {
-        // Sync every 5 minutes
-        this.syncInterval = setInterval(() => {
-            this.syncWithNetwork();
-        }, 5 * 60 * 1000);
-    }
-
-    // Stop synchronization
-    stopSync() {
-        if (this.syncInterval) {
-            clearInterval(this.syncInterval);
-            this.syncInterval = null;
-        }
-    }
-
-    // Synchronize with the network
-    async syncWithNetwork() {
-        try {
-            // Synchronize with the global vault API
-            const response = await fetch('http://localhost:3000/api/vault/stats');
-            if (response.ok) {
-                const stats = await response.json();
-                if (stats.recentThreats) {
-                    let newHashes = 0;
-                    for (const threat of stats.recentThreats) {
-                        if (!this.localThreats.has(threat.hash)) {
-                            this.localThreats.add(threat.hash);
-                            await this.merkleTree.addLeaf(threat.hash);
-                            newHashes++;
+                if (data.bv_threat_vault && Array.isArray(data.bv_threat_vault.blocks)) {
+                    for (const block of data.bv_threat_vault.blocks) {
+                        if (block.domainHash) {
+                            this.localThreats.add(block.domainHash);
+                            await this.merkleTree.addLeaf(block.domainHash);
                         }
-                    }
-                    if (newHashes > 0) {
-                        console.log(`[Blockchain] Synced ${newHashes} new threat hashes from global vault`);
                     }
                 }
             }
-            // Save updated state
-            await this.saveThreatData();
         } catch (error) {
-            console.warn('[Blockchain] Network sync failed (is the web server running?):', error);
+            console.warn('[Cryptographic Vault] Load warning:', error);
         }
     }
 
-    // Check if a domain is in the threat vault
-    async isThreat(domain) {
-        if (!this.isInitialized) {
-            await this.initialize();
-        }
-
+    /**
+     * Persist threat ledger to local storage
+     */
+    async saveThreatData() {
         try {
-            const domainHash = await this.hashDomain(domain);
-
-            // Check local cache first (fastest)
-            if (this.localThreats.has(domainHash)) {
-                return { isThreat: true, source: 'local_cache' };
-            }
-
-            // Check Merkle tree
-            const inMerkleTree = await this.merkleTree.contains(domainHash);
-            if (inMerkleTree) {
-                this.localThreats.add(domainHash); // Add to cache
-                return { isThreat: true, source: 'merkle_tree' };
-            }
-
-            return { isThreat: false, source: 'not_found' };
-
-        } catch (error) {
-            ;
-            return { isThreat: false, source: 'error', error: error.message };
-        }
-    }
-
-    // Submit a new threat detection
-    async submitThreat(domain, confidence, threatType, evidence) {
-        if (!this.isInitialized) {
-            await this.initialize();
-        }
-
-        try {
-            const domainHash = await this.hashDomain(domain);
-
-            // Register threat in registry
-            const threatRecord = await this.registry.registerThreat(
-                domainHash,
-                this.consensus.nodeId,
-                confidence,
-                threatType,
-                evidence
-            );
-
-            // Add to Merkle tree
-            await this.merkleTree.addLeaf(domainHash);
-
-            // Add to local cache
-            this.localThreats.add(domainHash);
-
-            // Submit for network validation
-            await this.consensus.submitThreat(domainHash, evidence, confidence);
-
-            // Also submit to the global vault API for aggregation
-            try {
-                await fetch('http://localhost:3000/api/vault/submit', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        hash: domainHash,
-                        source: 'extension-shield',
-                        confidence: confidence,
-                        threatType: threatType,
-                        clientId: this.consensus.nodeId
-                    })
+            if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+                await chrome.storage.local.set({
+                    bv_merkle_tree: this.merkleTree.serialize(),
+                    bv_local_threats_count: this.localThreats.size
                 });
-            } catch (apiError) {
-                console.warn('[Blockchain] Failed to submit to global API:', apiError);
             }
-
-            // Save updated data
-            await this.saveThreatData();
-
-            console.log('Threat submitted successfully: ' + domain);
-            return threatRecord;
-
         } catch (error) {
-            ;
-            throw error;
+            console.warn('[Cryptographic Vault] Save error:', error);
         }
     }
 
-    // Verify a threat detection
-    async verifyThreat(domainHash, isValid, confidence) {
-        if (!this.isInitialized) {
-            await this.initialize();
-        }
-
-        try {
-            // Submit verification to registry
-            const verification = await this.registry.submitVerification(
-                domainHash,
-                this.consensus.nodeId,
-                isValid,
-                confidence,
-                await this.signVerification(domainHash, isValid)
-            );
-
-            // Update local cache based on consensus
-            const threat = this.registry.getThreat(domainHash);
-            if (threat && threat.status === 'verified') {
-                this.localThreats.add(domainHash);
-                await this.merkleTree.addLeaf(domainHash);
-            } else if (threat && threat.status === 'rejected') {
-                this.localThreats.delete(domainHash);
-                await this.merkleTree.removeLeaf(domainHash);
-            }
-
-            // Save updated data
-            await this.saveThreatData();
-
-            return verification;
-
-        } catch (error) {
-            ;
-            throw error;
-        }
-    }
-
-    // Hash domain name using SHA-256
+    /**
+     * Hash a domain/hostname using SHA-256
+     */
     async hashDomain(domain) {
-        // Extract hostname if full URL provided
         let hostname = domain.trim().toLowerCase();
         try {
             if (hostname.includes('://')) {
@@ -283,127 +96,162 @@ class BlockchainThreatVault {
             } else if (hostname.includes('/')) {
                 hostname = hostname.split('/')[0];
             }
-            // Remove 'www.' for consistency
             if (hostname.startsWith('www.')) {
                 hostname = hostname.slice(4);
             }
-            // Remove port if present
             if (hostname.includes(':')) {
                 hostname = hostname.split(':')[0];
             }
-        } catch (e) {
-            // Fallback to basic cleaning
+        } catch {}
+        return await this.identity.sha256(hostname);
+    }
+
+    /**
+     * O(1) Fast Threat Verification against Merkle Vault
+     */
+    async isThreat(domain) {
+        if (!this.isInitialized) await this.initialize();
+
+        try {
+            const domainHash = await this.hashDomain(domain);
+
+            if (this.localThreats.has(domainHash)) {
+                return { isThreat: true, source: 'local_merkle_ledger', hash: domainHash };
+            }
+
+            const inTree = await this.merkleTree.contains(domainHash);
+            if (inTree) {
+                this.localThreats.add(domainHash);
+                return { isThreat: true, source: 'merkle_tree', hash: domainHash };
+            }
+
+            return { isThreat: false, source: 'clean', hash: domainHash };
+        } catch (error) {
+            return { isThreat: false, source: 'error', error: error.message };
+        }
+    }
+
+    /**
+     * Submit a threat detection to the community vault using ECDSA request signing
+     */
+    async submitThreat(domain, confidence = 0.95, threatType = 'MALICIOUS_DOMAIN', evidence = null) {
+        if (!this.isInitialized) await this.initialize();
+
+        const domainHash = await this.hashDomain(domain);
+
+        // Add to local Merkle tree immediately
+        await this.merkleTree.addLeaf(domainHash);
+        this.localThreats.add(domainHash);
+        await this.saveThreatData();
+
+        // Asymmetrically signed request to backend API
+        try {
+            const payload = {
+                hash: domainHash,
+                threatType,
+                confidence,
+                evidence: {
+                    source: 'extension_engine',
+                    timestamp: Date.now(),
+                    signals: evidence?.signals || []
+                }
+            };
+
+            const signedHeaders = await this.identity.signRequest('POST', '/api/vault/submit', payload);
+
+            const res = await fetch(`${this.apiBaseUrl}/submit`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...signedHeaders
+                },
+                body: JSON.stringify(payload)
+            });
+
+            if (res.ok) {
+                const data = await res.json();
+                console.log(`[Cryptographic Vault] Threat successfully submitted & verified: ${domainHash.slice(0, 10)}...`);
+                return data;
+            }
+        } catch (apiError) {
+            // Local detection continues unaffected even if network is unreachable
+            console.warn('[Cryptographic Vault] API submission deferred (offline):', apiError.message);
         }
 
-        return await this.merkleTree.sha256(hostname);
+        return { hash: domainHash, status: 'saved_locally' };
     }
 
-    // Sign verification (simplified)
-    async signVerification(domainHash, isValid) {
-        // In real implementation, this would use cryptographic signatures
-        const data = domainHash + ':' + isValid + ':' + Date.now();
-        return await this.merkleTree.sha256(data);
-    }
+    /**
+     * Synchronize verified threat hashes from global network
+     */
+    async syncWithNetwork() {
+        if (!this.isInitialized) await this.initialize();
 
-    // Get threat statistics
-    async getStatistics() {
-        if (!this.isInitialized) {
-            await this.initialize();
+        try {
+            let lastSync = 0;
+            if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+                const stored = await chrome.storage.local.get('bv_last_sync');
+                lastSync = stored.bv_last_sync || 0;
+            }
+
+            const res = await fetch(`${this.apiBaseUrl}/sync?since=${lastSync}&clientId=${this.identity.clientId}`);
+            if (!res.ok) return;
+
+            const data = await res.json();
+            if (data && data.hashes && Array.isArray(data.hashes)) {
+                let addedCount = 0;
+                for (const hash of data.hashes) {
+                    if (!this.localThreats.has(hash)) {
+                        this.localThreats.add(hash);
+                        await this.merkleTree.addLeaf(hash);
+                        addedCount++;
+                    }
+                }
+
+                if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+                    await chrome.storage.local.set({ bv_last_sync: Date.now() });
+                }
+
+                await this.saveThreatData();
+                if (addedCount > 0) {
+                    console.log(`[Cryptographic Vault] Synced ${addedCount} verified threat hashes from community vault.`);
+                }
+            }
+        } catch (error) {
+            // Soft fail if offline
         }
-
-        return {
-            ...this.registry.getStatistics(),
-            merkleRoot: this.merkleTree.getRoot(),
-            treeHeight: this.merkleTree.getHeight(),
-            localThreats: this.localThreats.size,
-            nodeId: this.consensus.nodeId
-        };
     }
 
-    // Get recent threats
-    async getRecentThreats(limit = 50) {
-        if (!this.isInitialized) {
-            await this.initialize();
-        }
-
-        return this.registry.getRecentThreats(limit);
-    }
-
-    // Search threats
-    async searchThreats(criteria) {
-        if (!this.isInitialized) {
-            await this.initialize();
-        }
-
-        return this.registry.searchThreats(criteria);
-    }
-
-    // Get Merkle proof for a threat
+    /**
+     * Get inclusion proof for a domain
+     */
     async getMerkleProof(domain) {
-        if (!this.isInitialized) {
-            await this.initialize();
-        }
-
+        if (!this.isInitialized) await this.initialize();
         const domainHash = await this.hashDomain(domain);
         return await this.merkleTree.getCompactProof(domainHash);
     }
 
-    // Verify Merkle proof
+    /**
+     * Verify inclusion proof
+     */
     async verifyMerkleProof(proof) {
-        if (!this.isInitialized) {
-            await this.initialize();
-        }
-
+        if (!this.isInitialized) await this.initialize();
         return await this.merkleTree.verifyCompactProof(proof);
     }
 
-    // Export vault data
-    async exportVault() {
-        if (!this.isInitialized) {
-            await this.initialize();
-        }
-
+    /**
+     * Get statistics
+     */
+    async getStatistics() {
+        if (!this.isInitialized) await this.initialize();
         return {
-            registry: this.registry.exportData(),
-            merkleTree: this.merkleTree.serialize(),
-            localThreats: Array.from(this.localThreats),
-            nodeId: this.consensus.nodeId,
-            exportTime: Date.now()
+            merkleRoot: this.merkleTree.getRoot() || '0'.repeat(64),
+            treeHeight: this.merkleTree.getHeight(),
+            totalLeaves: this.merkleTree.getLeafCount(),
+            localThreatsCount: this.localThreats.size,
+            nodeId: this.identity.clientId
         };
-    }
-
-    // Import vault data
-    async importVault(data) {
-        try {
-            if (data.registry) {
-                this.registry.importData(data.registry);
-            }
-
-            if (data.merkleTree) {
-                await this.merkleTree.deserialize(data.merkleTree);
-            }
-
-            if (data.localThreats) {
-                this.localThreats = new Set(data.localThreats);
-            }
-
-            await this.saveThreatData();
-            ;
-
-        } catch (error) {
-            ;
-            throw error;
-        }
-    }
-
-    // Cleanup resources
-    async destroy() {
-        this.stopSync();
-        await this.saveThreatData();
-        this.isInitialized = false;
-        ;
     }
 }
 
-// ES6 export for module imports
 export { BlockchainThreatVault };

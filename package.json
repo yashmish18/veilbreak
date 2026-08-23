@@ -1,4 +1,10 @@
 {
+  "name": "browser-vigilant",
+  "version": "2.0.0",
+  "type": "module",
+  "scripts": {
+    "test": "node --experimental-strip-types tests/run_all_tests.js"
+  },
   "dependencies": {
     "onnxruntime-web": "^1.14.0"
   }

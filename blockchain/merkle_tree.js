@@ -7,7 +7,7 @@ class MerkleTree {
     constructor() {
         this.leaves = [];
         this.levels = [];
-        this.crypto = window.crypto || window.msCrypto;
+        this.crypto = (typeof globalThis !== 'undefined' && globalThis.crypto) ? globalThis.crypto : (typeof window !== 'undefined' ? window.crypto : null);
     }
 
     // SHA-256 hash function using Web Crypto API
@@ -206,7 +206,7 @@ class MerkleTree {
 // Export for use in extension
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = MerkleTree;
-} else {
+} else if (typeof window !== 'undefined') {
     window.MerkleTree = MerkleTree;
 }
 

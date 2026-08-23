@@ -5,15 +5,19 @@
 // ── Web Dashboard Bridge (PRIORITY) ──────────────────────────────────────────
 let cachedSettings = null; // Local copy for instant allowlist checks
 
+const ALLOWED_DASHBOARD_ORIGINS = new Set([
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "https://localhost:3000",
+    "https://127.0.0.1:3000"
+]);
+
 window.addEventListener("message", (event) => {
+    // 1. Strict Origin Validation
+    if (!ALLOWED_DASHBOARD_ORIGINS.has(event.origin)) return;
     if (!event.data || event.data.type !== "BV_WEB_REQUEST") return;
 
     const { action, settings } = event.data;
-
-    // Cache settings locally if sent from dashboard
-    if (action === "SAVE_SETTINGS" && settings) {
-        cachedSettings = settings;
-    }
 
     if (action === "GET_STATS") {
         try {
@@ -25,28 +29,39 @@ window.addEventListener("message", (event) => {
                         type: "BV_WEB_RESPONSE",
                         action: "GET_STATS",
                         data: response
-                    }, "*");
+                    }, event.origin);
                 }
             });
         } catch (e) { }
-    }
+    } else if (action === "SAVE_SETTINGS") {
+        if (!settings || typeof settings !== "object") return;
+        // Validate settings schema
+        const sanitized = {};
+        if (typeof settings.protection === "boolean") sanitized.protection = settings.protection;
+        if (typeof settings.autoBlock === "boolean") sanitized.autoBlock = settings.autoBlock;
+        if (typeof settings.blockThreshold === "number" && settings.blockThreshold >= 0 && settings.blockThreshold <= 1) {
+            sanitized.blockThreshold = settings.blockThreshold;
+        }
+        if (Array.isArray(settings.allowlist)) {
+            sanitized.allowlist = settings.allowlist.filter(item => typeof item === "string" && item.length < 100);
+        }
 
-    if (action === "SAVE_SETTINGS") {
+        cachedSettings = { ...cachedSettings, ...sanitized };
+
         try {
-            chrome.runtime.sendMessage({ type: "SAVE_SETTINGS", settings }, (response) => {
+            chrome.runtime.sendMessage({ type: "SAVE_SETTINGS", settings: sanitized }, (response) => {
                 if (chrome.runtime.lastError) return;
                 window.postMessage({
                     type: "BV_WEB_RESPONSE",
                     action: "SAVE_SETTINGS",
                     success: response?.ack
-                }, "*");
+                }, event.origin);
             });
         } catch (e) { }
     }
 });
 
 // ── Blockchain Threat Vault Integration ──────────────────────────────────────────
-// Initialize blockchain components
 let threatVault = null;
 let isVaultInitialized = false;
 let blockchainModules = null;
@@ -56,23 +71,18 @@ async function loadBlockchainDependencies() {
     if (blockchainModules) return blockchainModules;
 
     try {
-        // Load all blockchain modules
         const basePath = chrome.runtime.getURL('blockchain/');
-        const [merkleModule, consensusModule, registryModule, vaultModule] = await Promise.all([
+        const [merkleModule, vaultModule] = await Promise.all([
             import(basePath + 'merkle_tree.js'),
-            import(basePath + 'federated_consensus.js'),
-            import(basePath + 'threat_registry.js'),
             import(basePath + 'blockchain_vault.js')
         ]);
 
         blockchainModules = {
             MerkleTree: merkleModule.MerkleTree,
-            FederatedConsensus: consensusModule.FederatedConsensus,
-            ThreatRegistry: registryModule.ThreatRegistry,
             BlockchainThreatVault: vaultModule.BlockchainThreatVault
         };
 
-        console.log('[Blockchain] Dependencies loaded successfully');
+        console.log('[Blockchain] Cryptographic vault dependencies loaded successfully');
         return blockchainModules;
     } catch (error) {
         console.error('[Blockchain] Failed to load dependencies:', error);
@@ -84,22 +94,14 @@ async function initializeThreatVault() {
     if (isVaultInitialized) return;
 
     try {
-        // Load dependencies first
         const modules = await loadBlockchainDependencies();
         if (!modules) {
             throw new Error('Failed to load blockchain dependencies');
         }
 
-        // Create instances with proper dependencies
-        const { BlockchainThreatVault, MerkleTree, FederatedConsensus, ThreatRegistry } = modules;
-
-        // Initialize components in correct order
+        const { BlockchainThreatVault, MerkleTree } = modules;
         const merkleTree = new MerkleTree();
-        const consensus = new FederatedConsensus('browser-node-' + Date.now());
-        const registry = new ThreatRegistry();
-
-        // Create vault with dependencies
-        threatVault = new BlockchainThreatVault(merkleTree, consensus, registry);
+        threatVault = new BlockchainThreatVault(merkleTree);
         await threatVault.initialize();
         isVaultInitialized = true;
         console.log('[Blockchain] Threat vault initialized successfully');
@@ -1763,8 +1765,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // ── Main execution ────────────────────────────────────────────────────────────
 
     async function executeVigilant() {
-        const t0 = performance.now();
+        // --- IDEMPOTENCY GUARD ---
+        if (window.__BV_SCANNED__) return;
+        window.__BV_SCANNED__ = true;
+
         const url = window.location.href;
+
+        // --- SCHEME GUARD (Only scan HTTP / HTTPS) ---
+        if (!url.startsWith("http://") && !url.startsWith("https://")) {
+            return;
+        }
+
+        // --- BYPASS GUARD ---
+        if (window.location.search.includes("bv_allow=1")) {
+            console.log("[BV] Navigation bypass active (bv_allow=1). Skipping scan.");
+            return;
+        }
+
+        const t0 = performance.now();
 
         // --- LOAD SETTINGS FIRST ---
         let settings = cachedSettings || { protection: true, domAnalysis: true, autoBlock: true, allowlist: [] };

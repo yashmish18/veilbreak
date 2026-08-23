@@ -1,29 +1,23 @@
 import { NextResponse } from 'next/server';
 export const dynamic = 'force-dynamic';
-import { threatRegistry } from '@/lib/store';
+import { threatRepo } from '@/lib/db';
 
 /**
- * Endpoint for extensions to sync their local threat database with the global network.
- * Returns new threat hashes since a given timestamp.
+ * Sync endpoint: returns only validated and distributable threat hashes
+ * since a given timestamp (ms).
  */
 export async function GET(req: Request) {
     try {
         const { searchParams } = new URL(req.url);
         const sinceStr = searchParams.get('since') || '0';
-        const since = parseInt(sinceStr);
+        const since = parseInt(sinceStr, 10) || 0;
+        const clientId = searchParams.get('clientId') || 'anonymous';
 
-        const allThreats = Array.from(threatRegistry.values() as IterableIterator<any>);
+        const hashes = threatRepo.getDistributableHashes(since);
 
-        // Filter threats created after the 'since' timestamp
-        // If 'since' is 0, it returns everything
-        const newThreats = allThreats.filter(t => {
-            const createdAt = new Date(t.createdAt).getTime();
-            return createdAt > since;
-        });
-
-        const hashes = newThreats.map(t => t.hash);
-
-        console.log(`[Sync API] Sending ${hashes.length} hashes to client since ${new Date(since).toISOString()}`);
+        if (hashes.length > 0) {
+            threatRepo.recordSync(clientId, hashes.length);
+        }
 
         return NextResponse.json({
             hashes,
